@@ -1,13 +1,19 @@
 # Dependencies
 node_modules/
 
-# Production build
+# Production builds
 dist/
+dist-server/
 
-# Environment variables
-.env
-.env.local
-.env.*.local
+# Environment variables (keep template tracked)
+.env*
+!.env.example
+
+# Local agent knowledge graph & private bid files
+.ua/
+.understand-anything/
+BID_SUBMISSION_READY.md
+OPEN_VUE_CHESS_BID.ps1
 
 # Test & coverage artifacts
 coverage/

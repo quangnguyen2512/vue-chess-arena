@@ -21,6 +21,7 @@ const props = defineProps<{
   roomCode: string | null
   roomStatus: RoomStatus | null
   myRoomColor: PlayerColor | null
+  roomPlayers: { w: boolean; b: boolean }
   rematchRequestedBy: PlayerColor | null
   inviteUrl: string | null
   outcome: GameOutcome | null
@@ -277,13 +278,21 @@ watch(
               Resign
             </button>
             <button
-              v-if="roomStatus === 'finished'"
+              v-if="roomStatus === 'finished' && roomPlayers.w && roomPlayers.b"
               type="button"
               class="btn-primary"
               :disabled="rematchRequestedBy === myRoomColor"
               @click="emit('request-rematch')"
             >
               {{ rematchLabel }}
+            </button>
+            <button
+              v-else-if="roomStatus === 'finished'"
+              type="button"
+              class="btn-primary"
+              @click="emit('create-room')"
+            >
+              New Room
             </button>
             <button type="button" class="btn-secondary" @click="emit('flip-board')">
               Flip

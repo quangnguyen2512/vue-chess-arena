@@ -598,7 +598,7 @@ export function useChessGame() {
         }
         if (!settled) {
           settled = true
-          reject(new Error('Could not reach multiplayer server. Start it with `npm run server`.'))
+          reject(new Error('Could not reach the multiplayer room server.'))
         }
       })
 
@@ -606,7 +606,7 @@ export function useChessGame() {
         wsStatus.value = 'error'
         if (!settled) {
           settled = true
-          reject(new Error('Multiplayer WebSocket connection failed. Start the server with `npm run server`.'))
+          reject(new Error('Multiplayer WebSocket connection failed.'))
         }
       })
     })
@@ -754,6 +754,7 @@ export function useChessGame() {
     inviteUrl,
 
     // Actions
+    clearBanners,
     handleSquareClick,
     handlePieceDrop,
     confirmPromotion,

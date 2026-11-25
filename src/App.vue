@@ -38,6 +38,7 @@ const game = useChessGame()
           :my-room-color="game.myRoomColor.value"
           :notice-banner="game.noticeBanner.value"
           :error-banner="game.errorBanner.value"
+          @dismiss-banner="game.clearBanners"
         />
 
         <ChessBoard
@@ -66,6 +67,7 @@ const game = useChessGame()
         :room-code="game.roomCode.value"
         :room-status="game.roomStatus.value"
         :my-room-color="game.myRoomColor.value"
+        :room-players="game.roomPlayers.value"
         :rematch-requested-by="game.rematchRequestedBy.value"
         :invite-url="game.inviteUrl.value"
         :outcome="game.outcome.value"

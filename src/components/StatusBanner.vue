@@ -17,6 +17,10 @@ const props = defineProps<{
   errorBanner: string | null
 }>()
 
+const emit = defineEmits<{
+  (e: 'dismiss-banner'): void
+}>()
+
 const headline = computed(() => {
   if (props.outcome) {
     return props.outcome.message
@@ -75,10 +79,26 @@ const toneClass = computed(() => {
     </div>
 
     <div v-if="errorBanner" class="alert-strip alert-error" role="alert">
-      {{ errorBanner }}
+      <span>{{ errorBanner }}</span>
+      <button
+        type="button"
+        class="alert-dismiss"
+        aria-label="Clear message"
+        @click="emit('dismiss-banner')"
+      >
+        Clear
+      </button>
     </div>
     <div v-else-if="noticeBanner" class="alert-strip alert-notice" role="status">
-      {{ noticeBanner }}
+      <span>{{ noticeBanner }}</span>
+      <button
+        type="button"
+        class="alert-dismiss"
+        aria-label="Clear message"
+        @click="emit('dismiss-banner')"
+      >
+        Clear
+      </button>
     </div>
   </div>
 </template>

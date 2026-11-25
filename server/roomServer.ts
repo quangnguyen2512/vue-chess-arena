@@ -1,6 +1,9 @@
 import { randomBytes } from 'node:crypto'
+import fs from 'node:fs'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Chess } from 'chess.js'
 import { WebSocket, WebSocketServer } from 'ws'
 import {
@@ -23,6 +26,25 @@ const ROOM_CODE_LENGTH = 6
 const SQUARE_RE = /^[a-h][1-8]$/
 const PROMOTION_PIECES = new Set<PromotionPiece>(['q', 'r', 'b', 'n'])
 
+const MIME_TYPES: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon',
+  '.woff2': 'font/woff2',
+  '.woff': 'font/woff',
+  '.ttf': 'font/ttf',
+  '.txt': 'text/plain; charset=utf-8',
+  '.wasm': 'application/wasm',
+}
+
 interface ChessRoom {
   code: string
   chess: Chess
@@ -43,6 +65,11 @@ interface SocketSession {
 export interface ChessServerOptions {
   port?: number
   host?: string
+  /**
+   * Directory containing built frontend assets (`index.html`).
+   * Defaults to auto-detecting `dist/` when present; pass `false` to disable static serving.
+   */
+  staticDir?: string | false
 }
 
 export interface StartedChessServer {
@@ -50,6 +77,7 @@ export interface StartedChessServer {
   host: string
   httpUrl: string
   wsUrl: string
+  staticDir: string | null
 }
 
 export interface ChessRoomServer {
@@ -57,6 +85,28 @@ export interface ChessRoomServer {
   close(): Promise<void>
   getActiveRoomCount(): number
   getRoomSnapshot(code: string): RoomSnapshot | null
+}
+
+function resolveStaticDirectory(option: string | false | undefined): string | null {
+  if (option === false) {
+    return null
+  }
+  if (typeof option === 'string') {
+    const resolved = path.resolve(option)
+    return fs.existsSync(path.join(resolved, 'index.html')) ? resolved : null
+  }
+
+  const candidates = [
+    path.resolve(process.cwd(), 'dist'),
+    fileURLToPath(new URL('../dist', import.meta.url)),
+    fileURLToPath(new URL('../../dist', import.meta.url)),
+  ]
+  for (const dir of candidates) {
+    if (fs.existsSync(path.join(dir, 'index.html'))) {
+      return dir
+    }
+  }
+  return null
 }
 
 function generateRoomCode(existing: Set<string>): string {
@@ -173,37 +223,134 @@ function isValidMoveInput(raw: unknown): raw is MoveInput {
   return true
 }
 
+async function serveFile(
+  res: http.ServerResponse,
+  filePath: string,
+  method: string,
+  cacheControl: string,
+): Promise<void> {
+  const ext = path.extname(filePath).toLowerCase()
+  const contentType = MIME_TYPES[ext] ?? 'application/octet-stream'
+  const content = await fs.promises.readFile(filePath)
+  res.writeHead(200, {
+    'Content-Type': contentType,
+    'Content-Length': content.byteLength,
+    'Cache-Control': cacheControl,
+  })
+  res.end(method === 'HEAD' ? undefined : content)
+}
+
 export function createChessServer(options: ChessServerOptions = {}): ChessRoomServer {
   const configuredPort = options.port ?? 3001
   const configuredHost = options.host ?? '127.0.0.1'
+  const activeStaticDir = resolveStaticDirectory(options.staticDir)
   const startedAt = Date.now()
 
   const rooms = new Map<string, ChessRoom>()
   const sessions = new Map<WebSocket, SocketSession>()
 
-  const httpServer = http.createServer((req, res) => {
-    const reqUrl = req.url ?? '/'
-    if (req.method === 'GET' && (reqUrl === '/health' || reqUrl === '/')) {
-      res.writeHead(200, {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-      })
-      res.end(
-        JSON.stringify({
-          status: 'ok',
-          service: 'vue-chess-room-server',
-          activeRooms: rooms.size,
-          uptimeMs: Date.now() - startedAt,
-        }),
-      )
+  const httpServer = http.createServer(async (req, res) => {
+    const method = req.method ?? 'GET'
+    let parsedUrl: URL
+    try {
+      parsedUrl = new URL(req.url ?? '/', 'http://localhost')
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ error: 'Malformed request URL' }))
       return
     }
-    res.writeHead(404, { 'Content-Type': 'application/json' })
+
+    const pathname = parsedUrl.pathname
+
+    if ((method === 'GET' || method === 'HEAD') && pathname === '/health') {
+      const payload = JSON.stringify({
+        status: 'ok',
+        service: 'vue-chess-room-server',
+        activeRooms: rooms.size,
+        staticFrontend: activeStaticDir !== null,
+        uptimeMs: Date.now() - startedAt,
+      })
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'Access-Control-Allow-Origin': '*',
+      })
+      res.end(method === 'HEAD' ? undefined : payload)
+      return
+    }
+
+    if (activeStaticDir && (method === 'GET' || method === 'HEAD') && pathname !== '/ws') {
+      let decodedPath: string
+      try {
+        decodedPath = decodeURIComponent(pathname)
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ error: 'Invalid URL encoding' }))
+        return
+      }
+
+      if (decodedPath.includes('\0') || decodedPath.includes('\\')) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ error: 'Invalid path' }))
+        return
+      }
+
+      const candidatePath = path.resolve(activeStaticDir, `.${decodedPath}`)
+      const relative = path.relative(activeStaticDir, candidatePath)
+      if (relative.startsWith('..') || path.isAbsolute(relative)) {
+        res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ error: 'Forbidden' }))
+        return
+      }
+
+      try {
+        if (decodedPath !== '/') {
+          const stat = await fs.promises.stat(candidatePath).catch(() => null)
+          if (stat && stat.isFile()) {
+            const cacheControl = decodedPath.startsWith('/assets/')
+              ? 'public, max-age=31536000, immutable'
+              : 'public, max-age=300'
+            await serveFile(res, candidatePath, method, cacheControl)
+            return
+          }
+        }
+
+        // SPA history/query fallback for `/` and `?room=CODE` routes (never for missing `.js`/`.css` assets)
+        if (path.extname(decodedPath) === '') {
+          const indexHtmlPath = path.join(activeStaticDir, 'index.html')
+          await serveFile(res, indexHtmlPath, method, 'no-cache')
+          return
+        }
+      } catch {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ error: 'Failed to read static asset' }))
+        return
+      }
+    }
+
+    if (!activeStaticDir && (method === 'GET' || method === 'HEAD') && pathname === '/') {
+      const payload = JSON.stringify({
+        status: 'ok',
+        service: 'vue-chess-room-server',
+        activeRooms: rooms.size,
+        staticFrontend: false,
+        uptimeMs: Date.now() - startedAt,
+      })
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Access-Control-Allow-Origin': '*',
+      })
+      res.end(method === 'HEAD' ? undefined : payload)
+      return
+    }
+
+    res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' })
     res.end(JSON.stringify({ error: 'Not found' }))
   })
 
   const wss = new WebSocketServer({
     server: httpServer,
+    path: '/ws',
     maxPayload: 8 * 1024,
   })
 
@@ -232,6 +379,7 @@ export function createChessServer(options: ChessServerOptions = {}): ChessRoomSe
     if (room.players[leavingColor] === socket) {
       room.players[leavingColor] = null
     }
+    room.rematchRequestedBy = null
     room.updatedAt = Date.now()
 
     const otherColor = oppositeColor(leavingColor)
@@ -244,7 +392,6 @@ export function createChessServer(options: ChessServerOptions = {}): ChessRoomSe
 
     if (room.status === 'playing') {
       room.status = 'finished'
-      room.rematchRequestedBy = null
       const winnerLabel = otherColor === 'w' ? 'White' : 'Black'
       room.outcome = {
         reason: 'disconnect',
@@ -629,14 +776,16 @@ export function createChessServer(options: ChessServerOptions = {}): ChessRoomSe
         httpServer.listen(configuredPort, configuredHost, () => {
           httpServer.off('error', reject)
           const address = httpServer.address() as AddressInfo
-          const hostForUrl = address.address === '::' || address.address === '0.0.0.0'
-            ? '127.0.0.1'
-            : address.address
+          const hostForUrl =
+            address.address === '::' || address.address === '0.0.0.0'
+              ? '127.0.0.1'
+              : address.address
           resolve({
             port: address.port,
             host: hostForUrl,
             httpUrl: `http://${hostForUrl}:${address.port}`,
             wsUrl: `ws://${hostForUrl}:${address.port}/ws`,
+            staticDir: activeStaticDir,
           })
         })
       })

@@ -1,0 +1,12 @@
+node_modules
+dist
+dist-server
+coverage
+.git
+.ua
+.understand-anything
+BID_SUBMISSION_READY.md
+OPEN_VUE_CHESS_BID.ps1
+.env*
+!.env.example
+*.log

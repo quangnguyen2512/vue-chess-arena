@@ -1,3 +1,6 @@
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { WebSocket } from 'ws'
 import {
@@ -280,5 +283,86 @@ describe('Multiplayer Chess WebSocket Room Server', () => {
     await Promise.all([white.close(), black.close(), p1.close()])
     await new Promise((r) => setTimeout(r, 40))
     expect(server.getActiveRoomCount()).toBe(0)
+  })
+
+  it('serves static dist/ SPA, ?room= invite routes, hashed assets, /health, and /ws on a single port', async () => {
+    const tempDist = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'vue-chess-dist-'))
+    await fs.promises.mkdir(path.join(tempDist, 'assets'), { recursive: true })
+    await fs.promises.writeFile(
+      path.join(tempDist, 'index.html'),
+      '<!doctype html><html><body><div id="app">Crownline Chess</div></body></html>',
+      'utf8',
+    )
+    await fs.promises.writeFile(
+      path.join(tempDist, 'assets', 'index-abc123.js'),
+      'console.log("crownline-chess-bundle");',
+      'utf8',
+    )
+
+    const unifiedServer = createChessServer({
+      port: 0,
+      host: '127.0.0.1',
+      staticDir: tempDist,
+    })
+    const unifiedInfo = await unifiedServer.start()
+    const unifiedClients: TestWsClient[] = []
+
+    try {
+      expect(unifiedInfo.staticDir).toBe(tempDist)
+
+      // 1. Root HTML and ?room=CODE invite URL both serve SPA index.html
+      const rootRes = await fetch(`${unifiedInfo.httpUrl}/`)
+      expect(rootRes.status).toBe(200)
+      expect(rootRes.headers.get('content-type')).toContain('text/html')
+      expect(await rootRes.text()).toContain('Crownline Chess')
+
+      const inviteRes = await fetch(`${unifiedInfo.httpUrl}/?room=K7P9QM`)
+      expect(inviteRes.status).toBe(200)
+      expect(inviteRes.headers.get('content-type')).toContain('text/html')
+      expect(await inviteRes.text()).toContain('Crownline Chess')
+
+      // 2. Hashed Vite bundle serves JS with immutable cache header
+      const jsRes = await fetch(`${unifiedInfo.httpUrl}/assets/index-abc123.js`)
+      expect(jsRes.status).toBe(200)
+      expect(jsRes.headers.get('content-type')).toContain('text/javascript')
+      expect(jsRes.headers.get('cache-control')).toContain('immutable')
+      expect(await jsRes.text()).toContain('crownline-chess-bundle')
+
+      // 3. Missing JS asset returns 404 JSON (never HTML) & encoded path traversal is rejected
+      const missingAsset = await fetch(`${unifiedInfo.httpUrl}/assets/missing.js`)
+      expect(missingAsset.status).toBe(404)
+
+      const traversalRes = await fetch(`${unifiedInfo.httpUrl}/%2e%2e/package.json`)
+      expect([403, 404]).toContain(traversalRes.status)
+
+      // 4. Health check & WebSocket multiplayer work simultaneously on the same port
+      const white = new TestWsClient(unifiedInfo.wsUrl)
+      const black = new TestWsClient(unifiedInfo.wsUrl)
+      unifiedClients.push(white, black)
+      await Promise.all([white.waitOpen(), black.waitOpen()])
+
+      white.send({ type: 'create_room' })
+      const created = await white.nextMessage('room_created')
+      black.send({ type: 'join_room', code: created.code })
+      await black.nextMessage('room_joined')
+      await white.nextMessage('state_update')
+
+      const healthRes = await fetch(`${unifiedInfo.httpUrl}/health`)
+      expect(healthRes.status).toBe(200)
+      const healthBody = (await healthRes.json()) as {
+        status: string
+        activeRooms: number
+        staticFrontend: boolean
+      }
+      expect(healthBody).toMatchObject({
+        status: 'ok',
+        activeRooms: 1,
+        staticFrontend: true,
+      })
+    } finally {
+      await Promise.all(unifiedClients.map((c) => c.close()))
+      await unifiedServer.close()
+      await fs.promises.rm(tempDist, { recursive: true, force: true })
+    }
   })
 })
